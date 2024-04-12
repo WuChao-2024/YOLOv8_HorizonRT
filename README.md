@@ -5,11 +5,11 @@
 
 <img src=".\img\(1)图像分类、(2)关键点检测、(3)物体检测和(4)实例分割举例.png" alt="(1)图像分类、(2)关键点检测、(3)物体检测和(4)实例分割举例" style="zoom:48%;" />
 
-代码托管在GitHub：https://github.com/WuChao-2024/YOLOv8_HorizonRT.git
+代码托管在GitHub：https://github.com/WuChao-2024/YOLOv8_HorizonRT.git，如果Markdown数学公式显示异常可前往Github阅读。
 
 ## 1. 公版模型介绍
 
-公版YOLOv8的检测头和后处理流程可用下图表示，其中YOLOv8的Backbone和Neck部分均可被BPU较好的加速，故在此处省略。
+公版YOLOv8的检测头和后处理流程可用下图表示，其中YOLOv8的Backbone和Neck部分均可被BPU较好的加速，故在此处省略。另外关于Backbone和Neck部分的高效修改可参考：https://developer.horizon.cc/forumDetail/189779523032809473
 
 <img src=".\img\公版处理流程.png" alt="公版处理流程" style="zoom:12%;" />
 
