@@ -24,7 +24,7 @@ $$
 
 随后的dist2bbox操作，将每个Bounding Box的ltrb描述解码为xyxy描述，ltrb分别表示左上右下四条边距离相对于Grid Cell中心的距离，相对位置还原成绝对位置后，再乘以对应特征层的采样倍数，即可还原成xyxy坐标，xyxy表示Bounding Box的左上角和右下角两个点坐标的预测值。
 
-<img src=".\img\ltrb2xyxy.png" alt="ltrb2xyxy" style="zoom:15%;" />
+<img src=".\img\ltrb2xyxy.jpg" alt="ltrb2xyxy" style="zoom:15%;" />
 
 图片输入为$Size=640$，对于Bounding box预测分支的第$i$个特征图$(i=1, 2, 3)$，对应的下采样倍数记为$Stride(i)$，在YOLOv8中，$Stride(1)=8, Stride(2)=16, Stride(3)=32$，对应特征图的尺寸记为$n_i = {Size}/{Stride(i)}$，即尺寸为$n_1 = 80, n_2 = 40 ,n_3 = 20$三个特征图，一共有$n_1^2+n_2^2+n_3^3=8400$个Grid Cell，负责预测8400个Bounding Box。
 
