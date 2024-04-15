@@ -1,5 +1,5 @@
 # YOLOv8_HorizonRT
-## J5部署YOLOv8后处理的高效实现
+## XJ3, XJ5部署YOLOv8后处理的高效实现
 
 下图表示了利用YOLOv8实现几种计算机视觉的检测任务的效果，其中Pose和Segment均以Detect的检测结果为基础，此文讨论Detect任务的后处理高效实现。
 
