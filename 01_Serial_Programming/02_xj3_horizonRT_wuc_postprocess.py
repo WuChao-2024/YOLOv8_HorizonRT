@@ -18,10 +18,15 @@ from scipy.special import softmax
 from time import time
 from hobot_dnn import pyeasy_dnn as dnn
 
-img_path = "./test_img/zidane.jpg"
-result_save_path = "./zidane.result.png"
-quantize_model_path = "./yolov8s_detect_bernoulli2_640x640_NCHW_2cores.bin"
+
+
+
+img_path = "./test_img/kite.jpg"
+result_save_path = "./kite.result.png"
+quantize_model_path = "/root/YOLOv8_HorizonRT/01_Serial_Programming/yolov8s_horizon_fix_detect_bernoulli2_640x640_NCHW_2cores.bin"
+# quantize_model_path = "yolov8s_detect_bernoulli2_640x640_NCHW_2cores.bin"
 input_image_size = 640
+classes_num = 80
 conf=0.2
 iou=0.5
 conf_inverse = -np.log(1/conf - 1)
@@ -75,170 +80,210 @@ def draw_detection(img, box, score, class_id):
     # Draw the label text on the image
     cv2.putText(img, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
-# 读取horizon_quantize模型, 并打印这个horizon_quantize模型的输入输出Tensor信息
-begin_time = time()
-quantize_model = dnn.load(quantize_model_path)
-print("\033[0;31;40m" + "Load horizon quantize model time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
-print("-> input tensors")
-for i, quantize_input in enumerate(quantize_model[0].inputs):
-    print(f"intput[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
+def main():
+    # 读取horizon_quantize模型, 并打印这个horizon_quantize模型的输入输出Tensor信息
+    begin_time = time()
+    quantize_model = dnn.load(quantize_model_path)
+    print("\033[0;31;40m" + "Load horizon quantize model time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
-print("-> output tensors")
-for i, quantize_input in enumerate(quantize_model[0].outputs):
-    print(f"output[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
+    print("-> input tensors")
+    for i, quantize_input in enumerate(quantize_model[0].inputs):
+        print(f"intput[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
 
-# 准备一些常量
-# 提前将反量化系数准备好
-s_bboxes_scale = quantize_model[0].outputs[0].properties.scale_data[:,np.newaxis]
-m_bboxes_scale = quantize_model[0].outputs[1].properties.scale_data[:,np.newaxis]
-l_bboxes_scale = quantize_model[0].outputs[2].properties.scale_data[:,np.newaxis]
-s_clses_scale = quantize_model[0].outputs[3].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
-m_clses_scale = quantize_model[0].outputs[4].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
-l_clses_scale = quantize_model[0].outputs[5].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
+    print("-> output tensors")
+    for i, quantize_input in enumerate(quantize_model[0].outputs):
+        print(f"output[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
 
-# DFL求期望的系数, 只需要生成一次
-weights_static = np.array([i for i in range(16)]).astype(np.float32)[np.newaxis, :, np.newaxis]
+    # 解码映射的顺序, 保证outpus[outputs_order[i]] = outputs_shape_order[i]
+    # Large, Medium, Small 
 
-# 提前准备一些索引, 只需要生成一次
-static_index = np.arange(8400)
+    # outputs_order = [0,1,2,3,4,5]
+    outputs_order = [-1,-1,-1,-1,-1,-1]
+    outputs_shape_order = [(1, 64, input_image_size//8, input_image_size//8), # s_bbox
+                        (1, 64, input_image_size//16, input_image_size//16), # m_bbox
+                        (1, 64, input_image_size//32, input_image_size//32), # l_bbox
+                        (1, classes_num, input_image_size//8, input_image_size//8), # s_cls
+                        (1, classes_num, input_image_size//16, input_image_size//16), # m_cls
+                        (1, classes_num, input_image_size//32, input_image_size//32)  # l_cls
+                        ]
+    for i in range(6):
+        a, b = quantize_model[0].outputs[i].properties.shape[1:3]
+        if a == 64:
+            if b ==80:
+                outputs_order[0] = i
+            elif b ==40:
+                outputs_order[1] = i
+            elif b ==20:
+                outputs_order[2] = i
+        elif a == 80:
+            if b ==80:
+                outputs_order[3] = i
+            elif b ==40:
+                outputs_order[4] = i
+            elif b ==20:
+                outputs_order[5] = i
 
-# anchors, 只需要生成一次
-s_anchor = np.stack([np.tile(np.linspace(0.5, 79.5, 80), reps=80), 
-                     np.repeat(np.arange(0.5, 80.5, 1), 80)], axis=0)
-m_anchor = np.stack([np.tile(np.linspace(0.5, 39.5, 40), reps=40), 
-                     np.repeat(np.arange(0.5, 40.5, 1), 40)], axis=0)
-l_anchor = np.stack([np.tile(np.linspace(0.5, 19.5, 20), reps=20), 
-                     np.repeat(np.arange(0.5, 20.5, 1), 20)], axis=0)
+    for i in range(6):
+        print(f"horizon_model.outputs[ outputs_order[{i}] ] = {quantize_model[0].outputs[outputs_order[i]].properties.shape}")
+    if -1 in outputs_order:
+        print("Sorry, your model don't match the post process code.")
 
-# 读取图片并利用resize的方式进行前处理
-begin_time = time()
-img = cv2.imread(img_path)
-print("\033[0;31;40m" + "Read image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 准备一些常量
+    # 提前将反量化系数准备好
+    s_bboxes_scale = quantize_model[0].outputs[outputs_order[0]].properties.scale_data[:,np.newaxis]
+    m_bboxes_scale = quantize_model[0].outputs[outputs_order[1]].properties.scale_data[:,np.newaxis]
+    l_bboxes_scale = quantize_model[0].outputs[outputs_order[2]].properties.scale_data[:,np.newaxis]
+    s_clses_scale = quantize_model[0].outputs[outputs_order[3]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
+    m_clses_scale = quantize_model[0].outputs[outputs_order[4]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
+    l_clses_scale = quantize_model[0].outputs[outputs_order[5]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
 
-begin_time = time()
-input_tensor = img.copy()
-print("\033[0;31;40m" + "Deep Copy image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # DFL求期望的系数, 只需要生成一次
+    weights_static = np.array([i for i in range(16)]).astype(np.float32)[np.newaxis, :, np.newaxis]
 
-begin_time = time()
-input_tensor = cv2.cvtColor(input_tensor, cv2.COLOR_BGR2RGB)
-input_tensor = cv2.resize(input_tensor, (input_image_size, input_image_size), interpolation=cv2.INTER_NEAREST)
-# input_tensor = np.array(input_tensor) / 255.0
-input_tensor = np.transpose(input_tensor, (2, 0, 1))
-input_tensor = np.expand_dims(input_tensor, axis=0)# .astype(np.float32)  # NCHW
-print("\033[0;31;40m" + "Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-print(f"{input_tensor.shape = }")
+    # 提前准备一些索引, 只需要生成一次
+    static_index = np.arange(8400)
 
-img_h, img_w = img.shape[0:2]
-y_scale, x_scale = img_h/input_image_size, img_w/input_image_size
+    # anchors, 只需要生成一次
+    s_anchor = np.stack([np.tile(np.linspace(0.5, 79.5, 80), reps=80), 
+                        np.repeat(np.arange(0.5, 80.5, 1), 80)], axis=0)
+    m_anchor = np.stack([np.tile(np.linspace(0.5, 39.5, 40), reps=40), 
+                        np.repeat(np.arange(0.5, 40.5, 1), 40)], axis=0)
+    l_anchor = np.stack([np.tile(np.linspace(0.5, 19.5, 20), reps=20), 
+                        np.repeat(np.arange(0.5, 20.5, 1), 20)], axis=0)
 
-# 推理
-begin_time = time()
-quantize_outputs = quantize_model[0].forward(input_tensor)
-print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 读取图片并利用resize的方式进行前处理
+    begin_time = time()
+    img = cv2.imread(img_path)
+    print("\033[0;31;40m" + "Read image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
-# 转为numpy
-begin_time = time()
-s_bboxes = quantize_outputs[0].buffer
-m_bboxes = quantize_outputs[1].buffer
-l_bboxes = quantize_outputs[2].buffer
-s_clses = quantize_outputs[3].buffer
-m_clses = quantize_outputs[4].buffer
-l_clses = quantize_outputs[5].buffer
+    begin_time = time()
+    input_tensor = img.copy()
+    print("\033[0;31;40m" + "Deep Copy image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
-# classify 分支反量化
-s_clses = s_clses.astype(np.float32) * s_clses_scale
-m_clses = m_clses.astype(np.float32) * m_clses_scale
-l_clses = l_clses.astype(np.float32) * l_clses_scale
+    begin_time = time()
+    input_tensor = cv2.cvtColor(input_tensor, cv2.COLOR_BGR2RGB)
+    input_tensor = cv2.resize(input_tensor, (input_image_size, input_image_size), interpolation=cv2.INTER_NEAREST)
+    # input_tensor = np.array(input_tensor) / 255.0
+    input_tensor = np.transpose(input_tensor, (2, 0, 1))
+    input_tensor = np.expand_dims(input_tensor, axis=0)# .astype(np.float32)  # NCHW
+    print("\033[0;31;40m" + "Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    print(f"{input_tensor.shape = }")
 
-# reshape
-s_clses = s_clses[0].reshape(80, -1)
-m_clses = m_clses[0].reshape(80, -1)
-l_clses = l_clses[0].reshape(80, -1)
-s_bboxes = s_bboxes[0].reshape(64, -1)
-m_bboxes = m_bboxes[0].reshape(64, -1)
-l_bboxes = l_bboxes[0].reshape(64, -1)
+    img_h, img_w = img.shape[0:2]
+    y_scale, x_scale = img_h/input_image_size, img_w/input_image_size
 
-# 利用numpy向量化操作完成阈值筛选（优化版）
-s_static_index = np.arange(6400)
-m_static_index = np.arange(1600)
-l_static_index = np.arange(400)
+    # 推理
+    begin_time = time()
+    quantize_outputs = quantize_model[0].forward(input_tensor)
+    print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
+    # 转为numpy
+    begin_time = time()
+    s_bboxes = quantize_outputs[outputs_order[0]].buffer
+    m_bboxes = quantize_outputs[outputs_order[1]].buffer
+    l_bboxes = quantize_outputs[outputs_order[2]].buffer
+    s_clses = quantize_outputs[outputs_order[3]].buffer
+    m_clses = quantize_outputs[outputs_order[4]].buffer
+    l_clses = quantize_outputs[outputs_order[5]].buffer
 
-s_class_ids = np.argmax(s_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
-s_max_scores = s_clses[s_class_ids,s_static_index] # 使用最大值的索引索引相应的最大值
-s_valid_indices = np.flatnonzero(s_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
+    # classify 分支反量化
+    s_clses = s_clses.astype(np.float32) * s_clses_scale
+    m_clses = m_clses.astype(np.float32) * m_clses_scale
+    l_clses = l_clses.astype(np.float32) * l_clses_scale
 
-m_class_ids = np.argmax(m_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
-m_max_scores = m_clses[m_class_ids,m_static_index] # 使用最大值的索引索引相应的最大值
-m_valid_indices = np.flatnonzero(m_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
+    # reshape
+    s_clses = s_clses[0].reshape(80, -1)
+    m_clses = m_clses[0].reshape(80, -1)
+    l_clses = l_clses[0].reshape(80, -1)
+    s_bboxes = s_bboxes[0].reshape(64, -1)
+    m_bboxes = m_bboxes[0].reshape(64, -1)
+    l_bboxes = l_bboxes[0].reshape(64, -1)
 
-l_class_ids = np.argmax(l_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
-l_max_scores = l_clses[l_class_ids,l_static_index] # 使用最大值的索引索引相应的最大值
-l_valid_indices = np.flatnonzero(l_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
-
-# 利用筛选结果，索引分数值和id值
-s_scores = s_max_scores[s_valid_indices]
-s_ids = s_class_ids[s_valid_indices]
-
-m_scores = m_max_scores[m_valid_indices]
-m_ids = m_class_ids[m_valid_indices]
-
-l_scores = l_max_scores[l_valid_indices]
-l_ids = l_class_ids[l_valid_indices]
-
-# 3个Classify分类分支：Sigmoid计算
-s_scores = 1 / (1 + np.exp(-s_scores))
-m_scores = 1 / (1 + np.exp(-m_scores))
-l_scores = 1 / (1 + np.exp(-l_scores))
-
-# 3个Bounding Box分支：反量化
-s_bboxes_float32 = s_bboxes[:,s_valid_indices].astype(np.float32) * s_bboxes_scale
-m_bboxes_float32 = m_bboxes[:,m_valid_indices].astype(np.float32) * m_bboxes_scale
-l_bboxes_float32 = l_bboxes[:,l_valid_indices].astype(np.float32) * l_bboxes_scale
-
-# 3个Bounding Box分支：dist2bbox（ltrb2xyxy）
-s_ltrb_indices = np.sum(softmax(s_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
-s_anchor_indices = s_anchor[:,s_valid_indices]
-s_x1y1 = s_anchor_indices - s_ltrb_indices[0:2]
-s_x2y2 = s_anchor_indices + s_ltrb_indices[2:4]
-s_dbboxes = np.vstack([s_x1y1, s_x2y2]).transpose(1,0)*8
-
-m_ltrb_indices = np.sum(softmax(m_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
-m_anchor_indices = m_anchor[:,m_valid_indices]
-m_x1y1 = m_anchor_indices - m_ltrb_indices[0:2]
-m_x2y2 = m_anchor_indices + m_ltrb_indices[2:4]
-m_dbboxes = np.vstack([m_x1y1, m_x2y2]).transpose(1,0)*16
-
-l_ltrb_indices = np.sum(softmax(l_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
-l_anchor_indices = l_anchor[:,l_valid_indices]
-l_x1y1 = l_anchor_indices - l_ltrb_indices[0:2]
-l_x2y2 = l_anchor_indices + l_ltrb_indices[2:4]
-l_dbboxes = np.vstack([l_x1y1, l_x2y2]).transpose(1,0)*32
+    # 利用numpy向量化操作完成阈值筛选（优化版）
+    s_static_index = np.arange(6400)
+    m_static_index = np.arange(1600)
+    l_static_index = np.arange(400)
 
 
-# 大中小特征层阈值筛选结果拼接
-dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes), axis=0)
-scores = np.concatenate((s_scores, m_scores, l_scores), axis=0)
-ids = np.concatenate((s_ids, m_ids, l_ids), axis=0)
+    s_class_ids = np.argmax(s_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+    s_max_scores = s_clses[s_class_ids,s_static_index] # 使用最大值的索引索引相应的最大值
+    s_valid_indices = np.flatnonzero(s_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
-# nms
-indices = cv2.dnn.NMSBoxes(dbboxes, scores, conf, iou)
-print("\033[0;31;40m" + "Post Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    m_class_ids = np.argmax(m_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+    m_max_scores = m_clses[m_class_ids,m_static_index] # 使用最大值的索引索引相应的最大值
+    m_valid_indices = np.flatnonzero(m_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
+
+    l_class_ids = np.argmax(l_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+    l_max_scores = l_clses[l_class_ids,l_static_index] # 使用最大值的索引索引相应的最大值
+    l_valid_indices = np.flatnonzero(l_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
+
+    # 利用筛选结果，索引分数值和id值
+    s_scores = s_max_scores[s_valid_indices]
+    s_ids = s_class_ids[s_valid_indices]
+
+    m_scores = m_max_scores[m_valid_indices]
+    m_ids = m_class_ids[m_valid_indices]
+
+    l_scores = l_max_scores[l_valid_indices]
+    l_ids = l_class_ids[l_valid_indices]
+
+    # 3个Classify分类分支：Sigmoid计算
+    s_scores = 1 / (1 + np.exp(-s_scores))
+    m_scores = 1 / (1 + np.exp(-m_scores))
+    l_scores = 1 / (1 + np.exp(-l_scores))
+
+    # 3个Bounding Box分支：反量化
+    s_bboxes_float32 = s_bboxes[:,s_valid_indices].astype(np.float32) * s_bboxes_scale
+    m_bboxes_float32 = m_bboxes[:,m_valid_indices].astype(np.float32) * m_bboxes_scale
+    l_bboxes_float32 = l_bboxes[:,l_valid_indices].astype(np.float32) * l_bboxes_scale
+
+    # 3个Bounding Box分支：dist2bbox（ltrb2xyxy）
+    s_ltrb_indices = np.sum(softmax(s_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
+    s_anchor_indices = s_anchor[:,s_valid_indices]
+    s_x1y1 = s_anchor_indices - s_ltrb_indices[0:2]
+    s_x2y2 = s_anchor_indices + s_ltrb_indices[2:4]
+    s_dbboxes = np.vstack([s_x1y1, s_x2y2]).transpose(1,0)*8
+
+    m_ltrb_indices = np.sum(softmax(m_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
+    m_anchor_indices = m_anchor[:,m_valid_indices]
+    m_x1y1 = m_anchor_indices - m_ltrb_indices[0:2]
+    m_x2y2 = m_anchor_indices + m_ltrb_indices[2:4]
+    m_dbboxes = np.vstack([m_x1y1, m_x2y2]).transpose(1,0)*16
+
+    l_ltrb_indices = np.sum(softmax(l_bboxes_float32.reshape(4, 16,-1), axis=1) * weights_static, axis=1)
+    l_anchor_indices = l_anchor[:,l_valid_indices]
+    l_x1y1 = l_anchor_indices - l_ltrb_indices[0:2]
+    l_x2y2 = l_anchor_indices + l_ltrb_indices[2:4]
+    l_dbboxes = np.vstack([l_x1y1, l_x2y2]).transpose(1,0)*32
 
 
-# 绘制
-begin_time = time()
-for index in indices:
-    score = scores[index]
-    class_id = ids[index]
-    x1, y1, x2, y2 = dbboxes[index]
-    x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
-    print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
-    draw_detection(img, (x1, y1, x2, y2), score, class_id)
-print("\033[0;31;40m" + "Draw Result time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 大中小特征层阈值筛选结果拼接
+    dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes), axis=0)
+    scores = np.concatenate((s_scores, m_scores, l_scores), axis=0)
+    ids = np.concatenate((s_ids, m_ids, l_ids), axis=0)
 
-# 保存图片到本地
-begin_time = time()
-cv2.imwrite(result_save_path, img)
-print("\033[0;31;40m" + "cv2.imwrite time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # nms
+    indices = cv2.dnn.NMSBoxes(dbboxes, scores, conf, iou)
+    print("\033[0;31;40m" + "Post Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+
+
+    # 绘制
+    begin_time = time()
+    for index in indices:
+        score = scores[index]
+        class_id = ids[index]
+        x1, y1, x2, y2 = dbboxes[index]
+        x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
+        print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
+        draw_detection(img, (x1, y1, x2, y2), score, class_id)
+    print("\033[0;31;40m" + "Draw Result time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+
+    # 保存图片到本地
+    begin_time = time()
+    cv2.imwrite(result_save_path, img)
+    print("\033[0;31;40m" + "cv2.imwrite time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+
+
+if __name__ == "__main__":
+    main()

@@ -248,6 +248,10 @@ hrt_model_exec perf --model_file yolov8s_640x640_NCHW.bin \
 代码托管在GitHub：https://github.com/WuChao-2024/YOLOv8_HorizonRT.git
 
 包括ipynb的交互式运行脚本和.py直接运行的py文件，均直白式运行，没有复杂的封装和嵌套，包含XJ3和XJ5的编译后bin模型和运行参考，长期维护中。
+目前包括: 
+640分辨率 80类别
+原版Backbone + Neck的onnx与bin模型, 包括Bernoulli2。
+地平线改Backbone + Neck的onnx与bin模型, 包括Bernoulli2和Bayes。
 
 ## 6. 并行程序设计参考
 由于python不承担任何计算操作, 只是调用BPU或者numpy的接口, 所以对于Python程序而言是一个IO密集的程序, Python实现多线程可行, 且不会受到Pyhton全局GIL锁影响, 具体程序设计中, 请关注Github仓库.
