@@ -45,6 +45,9 @@ def main():
     # 用于控制线程的全局变量
     global is_running, is_loading, is_forwarding, is_writing
     is_running, is_loading, is_forwarding, is_writing = True, True, True, True
+    global mux
+    mux = Lock()
+
 
     # 推理实例
     model = YOLOv8_Detect_img(opt)
@@ -53,8 +56,10 @@ def main():
     cap = cv2.VideoCapture("test_img/yolo_demo_video.mp4")
     
     # 任务队列
-    task_queue = Queue(10)
+    task_queue = YOLO_detect_task_Queue(30)
     save_queue = Queue(1800)
+
+    sleep(1)
 
     # 创建并启动读取线程
     task_loader = Dataloader_videoCapture(model, cap, task_queue, 0.001)
@@ -64,26 +69,25 @@ def main():
     inference_threads = [InferenceThread(model, task_queue, save_queue, 0.001) for _ in range(n2)]
     for t in inference_threads:
         t.start()
-    cnt = 1
+
+    # 用于计算帧率的全局变量
+    global frame_counter
+    frame_counter = 0
+    begin_time = time()
     while is_running:
-        print(save_queue.qsize())
-        # cnt += 1
-        # print(is_running, cnt)
-        
-        if not save_queue.empty():
-            task = save_queue.get()
-            print(task.img.shape)
-            del(task)
-        sleep(0.001)
+        delta_time = time() - begin_time
+        if delta_time > 0.5:
+            fps = frame_counter/delta_time
+            frame_counter = 0
+            begin_time = time()       
+            print("Smart FPS = %.2f"%fps) 
+        sleep(0.01)
+
     print("wait_join")
     task_loader.join()
     # 等待所有推理线程完成
     for t in inference_threads:
         t.join()
-    exit()
-
-
-
     exit()
 
 
@@ -322,73 +326,132 @@ def signal_handler(signal, frame):
     sys.exit(0)
 
 class YOLO_detect_task():
-    def __init__(self, model, img):
+    def __init__(self):
         # 存储图
-        self.img = img
+        self.img = None
         # 存储拉伸量
-        img_h, img_w = img.shape[0:2]
-        self.y_scale, self.x_scale = img_h/model.input_image_size, img_w/model.input_image_size
-        # 存储input_tensor
-        self.input_tensor = model.preprocess(img)
-        # 存储推理结果
-        self.dbboxes = None
-        self.scores = None
-        self.ids = None
-        self.indices = None
+        self.y_scale = None
+        self.x_scale = None
+
+class YOLO_detect_task_Queue:
+    def __init__(self, n):
+        self.queue = [YOLO_detect_task() for i in range(n)]  # 初始化队列，声明n个YOLO_Task对象
+        self.size = n
+        self.head = 0
+        self.tail = 0
+
+    def is_empty(self):
+        return self.head == self.tail
+
+    def is_full(self):
+        return self.head == (self.tail + 1) % self.size
+
+    def get(self, delay_time, try_times):
+        # 尝试[try_times]次，每次间隔[delay_time]秒，把任务塞进去
+        # 否则返回-1
+        while try_times >= 0:
+            if not self.is_full():
+                break
+            sleep(delay_time)
+            try_times -= 1
+        if try_times < 0:
+            return -1
+        task_index = self.head
+        self.head = (self.head + 1) % self.size
+        return task_index
+
+    def put(self, delay_time, try_times):
+        # 尝试[try_times]次，每次间隔[delay_time]秒，把任务取出来
+        # 否则返回-1
+        while try_times >= 0:
+            if not self.is_empty():
+                break
+            sleep(delay_time)
+            try_times -= 1
+        if try_times < 0:
+            return -1
+
+        task_index = self.tail
+        self.tail = (self.tail + 1) % self.size
+        return task_index
 
 class Dataloader_videoCapture(Thread):
-    def __init__(self, model, cap, q, delay_time):
+    # 从cap中读帧, 一直读到无帧可读
+    # delay_time 用于控制读帧的频率，尽量和极限帧率的帧间隔一致, 一般设置为0.033 s
+    def __init__(self, model, cap, task_queue, delay_time):
         Thread.__init__(self)
         self.cap = cap
-        self.q = q
+        self.task_queue = task_queue
         self.model = model
         self.delay_time = delay_time
     def run(self):
-        global is_running, is_loading
-        while is_running:
-            if not self.q.full():
-                #begin_time = time()
+        global is_loading
+        while is_loading:
+            if not self.task_queue.is_full():
+                # begin_time = time()
                 ret, frame = self.cap.read()
                 if ret:
-                    self.q.put(YOLO_detect_task(self.model, frame))
+                    # 读取和前处理
+                    img_h, img_w = frame.shape[0:2]
+                    y_scale = img_h/self.model.input_image_size
+                    x_scale = img_w/self.model.input_image_size
+                    # 更新到队列，锁线程
+                    mux.acquire()
+                    task_index = self.task_queue.get(0.001, 100)
+                    self.task_queue.queue[task_index].img = frame
+                    self.task_queue.queue[task_index].x_scale = x_scale
+                    self.task_queue.queue[task_index].y_scale = y_scale
+                    mux.release()
                 else:
                     is_loading = False
-                #print("\033[0;31;40m" + "Read and Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+                    break
+                # print("\033[0;31;40m" + "Read and Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
             sleep(self.delay_time)
+        print("[INFO] Dateloader thread exit.")
 
 class InferenceThread(Thread):
-    def __init__(self, model, q, result_q, delay_time):
+    # 推理的线程
+    # 
+    def __init__(self, model, task_queue, result_queue, delay_time):
         Thread.__init__(self)
-        self.q = q
-        self.result_q = result_q
+        self.task_queue = task_queue
+        self.result_queue = result_queue
         self.model = model
         self.delay_time = delay_time
     def run(self):
         global is_running, is_forwarding
         while is_running:
-            if not self.q.empty():
+            
+            if not self.task_queue.is_empty():
                 begin_time = time()
-                task = self.q.get()
-                img = task.img
+                # 获取任务的变量，锁线程
+                mux.acquire()
+                task_index = self.task_queue.put(0.001, 100)
+                img = self.task_queue.queue[task_index].img
+                x_scale = self.task_queue.queue[task_index].x_scale
+                y_scale = self.task_queue.queue[task_index].y_scale
+                mux.release()
+                input_tensor = self.model.preprocess(img)
+
                 # 推理, 后处理, 绘制
-                output_tensors = self.model.forward(task.input_tensor)
+                output_tensors = self.model.forward(input_tensor)
                 dbboxes, scores, ids, indices = self.model.postprocess(output_tensors)
                 for index in indices:
                     score = scores[index]
                     class_id = ids[index]
                     x1, y1, x2, y2 = dbboxes[index]
-                    x1, y1, x2, y2 = int(x1*task.x_scale), int(y1*task.y_scale), int(x2*task.x_scale), int(y2*task.y_scale)
-                    # print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
+                
+                    x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
                     draw_detection(img, (x1, y1, x2, y2), score, class_id)
-                # 图像存入结果队列
-                is_put = False
-                while not is_put:
-                    if not self.result_q.full():
-                        self.result_q.put(img)
-                        is_put = True
-                    sleep(self.delay_time)
-                del(task)
+                
+                # 帧率计数器自增
+                mux.acquire()
+                global frame_counter
+                frame_counter += 1
+                mux.release()
                 print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+            elif not is_loading:
+                is_running = False
             sleep(self.delay_time)
 
   
