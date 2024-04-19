@@ -3,6 +3,18 @@
 
 下图表示了利用YOLOv8实现几种计算机视觉的检测任务的效果，其中Pose和Segment均以Detect的检测结果为基础，此文讨论Detect任务的后处理高效实现。
 
+亮点：
+
+ - 大量减少后处理无用数据的反量化，遍历和计算。
+ - 所有的python for循环使用numpy向量化操作。
+ - 模型尾部全为conv算子，全以int32高精度输出。
+
+RDK X3 实测效果
+<img src=".\img\YOLOV8s_Detect_xj3_demo.png" alt="YOLOV8s_Detect_xj3_demo.png" style="zoom:48%;" />
+
+RDK Ultra 实测效果
+<img src=".\img\YOLOV8s_Detect_xj5_demo.png" alt="YOLOV8s_Detect_xj5_demo.png" style="zoom:48%;" />
+
 <img src=".\img\(1)图像分类、(2)关键点检测、(3)物体检测和(4)实例分割举例.png" alt="(1)图像分类、(2)关键点检测、(3)物体检测和(4)实例分割举例" style="zoom:48%;" />
 
 代码托管在GitHub：https://github.com/WuChao-2024/YOLOv8_HorizonRT.git，如果Markdown数学公式显示异常可前往Github阅读。
@@ -254,7 +266,7 @@ hrt_model_exec perf --model_file yolov8s_640x640_NCHW.bin \
 地平线改Backbone + Neck的onnx与bin模型, 包括Bernoulli2和Bayes。
 
 ## 6. 并行程序设计参考
-由于python不承担任何计算操作, 只是调用BPU或者numpy的接口, 所以对于Python程序而言是一个IO密集的程序, Python实现多线程可行, 且不会受到Pyhton全局GIL锁影响, 具体程序设计中, 请关注Github仓库.
+由于python不承担任何计算操作, 只是调用BPU或者numpy的接口, 所以对于Python程序而言是一个IO密集的程序, Python实现多线程可行, 且不会受到Pyhton全局GIL锁影响. 具体程序更新完善中, 请关注Github仓库. 目前, Python的多线程程序, YOLOv8s, Detect, 640×640分辨率, 80类别, 在X3上可跑到15fps, 在Ultra上可跑到30fps, 在批量的预测的精度验证的应用中可一定的加快速度, 未来会封装进TROS以进一步提高效率, 满足实时视频流目标检测的需求.
 
 ## 7. 应用场景和思考
 
