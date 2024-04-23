@@ -31,7 +31,7 @@ from hobot_dnn import pyeasy_dnn as dnn
 # is_running = True
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_horizon_fix_detect_bernoulli2_640x640_NCHW_1core.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
+    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_detect_bayes_640x640_NCHW.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
     parser.add_argument('--test-img', type=str, default='./test_img/kite.jpg', help='Path to Load Test Image.')
     parser.add_argument('--classes-num', type=int, default=80, help='Classes Num to Detect.')
     parser.add_argument('--input-size', type=int, default=640, help='Model Input Size')
@@ -40,7 +40,7 @@ def main():
     opt = parser.parse_args()
 
     # 线程数配置
-    n2 = 4  # 推理视频帧线程数
+    n2 = 2  # 推理视频帧线程数
 
     # 用于控制线程的全局变量
     global is_running, is_loading, is_forwarding, is_writing
