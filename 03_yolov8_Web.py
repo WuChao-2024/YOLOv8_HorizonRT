@@ -18,14 +18,18 @@
 # -*- coding:utf-8 -*-
 # Author: WuChao D-Robotics
 # Date: 2024-04-16
-# Description: Serial Programming with args
+# Description: Parallel Programming with args
 
-import cv2
+import cv2, argparse, sys
 import numpy as np
+from threading import Thread, Lock
+from queue import Queue
+
 from scipy.special import softmax
-import argparse
-from time import time
+from time import time, sleep
 from hobot_dnn import pyeasy_dnn as dnn
+
+from flask import Flask, render_template, Response
 
 def main():
     parser = argparse.ArgumentParser()
@@ -37,49 +41,50 @@ def main():
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold.')
     opt = parser.parse_args()
 
+    # 线程数配置
+    n2 = 2  # 推理视频帧线程数
+
+    # 用于控制线程的全局变量
+    global is_loading, is_forwarding, is_writing
+    is_loading, is_forwarding, is_writing = True, True, True
+
     # 推理实例
     model = YOLOv8_Detect_img(opt)
 
-    # 读图
-    begin_time = time()
-    img = cv2.imread(opt.test_img)
-    print("\033[0;31;40m" + "Read image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
-    # 存储拉伸量
-    img_h, img_w = img.shape[0:2]
-    y_scale, x_scale = img_h/model.input_image_size, img_w/model.input_image_size
+    # 任务队列
+    global task_queue, save_queue
+    task_queue = Queue(30)
+    save_queue = Queue(30)  # 结果保存队列多缓存一些
 
-    # 前处理
-    begin_time = time()
-    input_tensor = model.preprocess(img)
-    print("\033[0;31;40m" + "Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-    print(f"{input_tensor.shape = }")
+    sleep(1)
 
-    # 推理
-    begin_time = time()
-    output_tensors = model.forward(input_tensor)
-    print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 创建并启动读取线程
+    video_path = "/dev/video0"
+    task_loader = Dataloader_videoCapture(video_path, task_queue, 0.005)
+    task_loader.start()
 
-    # 后处理
-    begin_time = time()
-    dbboxes, scores, ids, indices = model.postprocess(output_tensors)
-    print("\033[0;31;40m" + "Post Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 创建并启动推理线程
+    inference_threads = [InferenceThread(_, model, task_queue, save_queue, 0.005) for _ in range(n2)]
+    for t in inference_threads:
+        t.start()
+    
 
-    # 绘制
-    begin_time = time()
-    for index in indices:
-        score = scores[index]
-        class_id = ids[index]
-        x1, y1, x2, y2 = dbboxes[index]
-        x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
-        print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
-        draw_detection(img, (x1, y1, x2, y2), score, class_id)
-    print("\033[0;31;40m" + "Draw Result time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    # 创建并启动日志打印线程
+    result_writer = msg_printer(task_queue, save_queue, 0.5)
+    result_writer.start()    
 
-    # 保存图片到本地
-    begin_time = time()
-    cv2.imwrite(opt.test_img + ".result.png", img)
-    print("\033[0;31;40m" + "cv2.imwrite time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    app.run(debug=False, port=7998, host="0.0.0.0")
+
+    print("[INFO] wait_join")
+    task_loader.join()
+    for t in inference_threads:
+        t.join()
+    result_writer.join()
+    result_writer.join()
+    print("[INFO] All task done.")
+    exit()
+
 
 
 class YOLOv8_Detect_img():
@@ -266,9 +271,135 @@ class YOLOv8_Detect_img():
 
         return dbboxes, scores, ids, indices
 
-    
+
+def signal_handler(signal, frame):
+    global is_loading, is_forwarding, is_writing
+    is_loading, is_forwarding, is_writing = False, False, False
+    print('Ctrl+C, stopping!!!')
+    sys.exit(0)
 
 
+class Dataloader_videoCapture(Thread):
+    # 从cap中读帧, 一直读到无帧可读
+    # delay_time 用于控制读帧的频率，尽量和极限帧率的帧间隔一致, 一般设置为0.033 s
+    def __init__(self, video_path, task_queue, delay_time):
+        Thread.__init__(self)
+        self.cap = cv2.VideoCapture(video_path)
+        self.task_queue = task_queue
+        self.delay_time = delay_time
+    def run(self):
+        global is_loading
+        while is_loading:
+            if not self.task_queue.full():
+                # begin_time = time()
+                ret, frame = self.cap.read()
+                if ret:
+                    self.task_queue.put(frame)
+                else:
+                    is_loading = False
+                    self.cap.release()
+                    break
+                # print("\033[0;31;40m" + "Read time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
+            sleep(self.delay_time)
+        print("[INFO] Dateloader thread exit.")
+
+class InferenceThread(Thread):
+    # 推理的线程
+    def __init__(self, i, model, task_queue, result_queue, delay_time):
+        Thread.__init__(self)
+        self.task_queue = task_queue
+        self.result_queue = result_queue
+        self.model = model
+        self.delay_time = delay_time
+        self.i = i
+    def run(self):
+        global is_forwarding, is_running, frame_counter
+        while is_forwarding:
+            if not self.task_queue.empty():
+                # begin_time = time()
+                # 从任务队列取图
+                img = self.task_queue.get()
+                # 存储拉伸量
+                img_h, img_w = img.shape[0:2]
+                y_scale, x_scale = img_h/self.model.input_image_size, img_w/self.model.input_image_size
+                # 前处理
+                input_tensor = self.model.preprocess(img)
+                # 推理
+                output_tensors = self.model.forward(input_tensor)
+                # 后处理
+                dbboxes, scores, ids, indices = self.model.postprocess(output_tensors)
+                # 绘制
+                for index in indices:
+                    score = scores[index]
+                    class_id = ids[index]
+                    x1, y1, x2, y2 = dbboxes[index]
+                    x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
+                    draw_detection(img, (x1, y1, x2, y2), score, class_id)
+                # 结果存入结果队列
+                trytimes = 5
+                while trytimes > 0:
+                    trytimes -= 1
+                    if not self.result_queue.full():
+                        trytimes = 0
+                        self.result_queue.put(img)
+                # 帧率计数器自增
+                if trytimes >= 0:
+                    frame_counter += 1
+                # print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+            elif not is_loading:
+                is_forwarding = False
+            sleep(self.delay_time)
+        print(f"[INFO] Forward thread {self.i} exit.")
+
+
+app = Flask(__name__)
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+def gen_frames():
+    global is_forwarding, is_writing, save_queue
+    while not save_queue.empty():
+        save_queue.get()
+    while is_writing:
+        if not save_queue.empty():
+            # begin_time = time()
+            img_result = save_queue.get()
+            cv2.putText(img_result, '%.2f fps'%fps, (40, 40), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+            ret, buffer = cv2.imencode('.jpg', img_result, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            # print("\033[0;31;40m" + "Frame Write time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
+        elif not is_forwarding:
+            #self.out.release()
+            is_writing = False
+        sleep(0.001)
+
+class msg_printer(Thread): 
+    # 用于计算帧率的全局变量
+    def __init__(self, task_queue, save_queue, delay_time):
+        Thread.__init__(self)
+        self.delay_time = delay_time
+        self.task_queue = task_queue
+        self.save_queue = save_queue
+    def run(self):
+        global frame_counter, fps
+        frame_counter = 0
+        fps = 0.0
+        begin_time = time()
+        while is_loading or is_forwarding or is_writing:
+            delta_time = time() - begin_time
+            fps = frame_counter/delta_time
+            frame_counter = 0
+            begin_time = time()       
+            print("Smart FPS = %.2f, task_queue_size = %d, save_queue_size = %d"%(fps, self.task_queue.qsize(), self.save_queue.qsize())) 
+            sleep(self.delay_time)
+        print("[INFO] msg_printer thread exit.")
   
 # 一些常量或函数
 coco_names = [

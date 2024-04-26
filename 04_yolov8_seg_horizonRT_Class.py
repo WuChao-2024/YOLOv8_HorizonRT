@@ -17,8 +17,8 @@
 
 # -*- coding:utf-8 -*-
 # Author: WuChao D-Robotics
-# Date: 2024-04-16
-# Description: Serial Programming with args
+# Date: 2024-04-26
+# Description: Serial Programming with args, YOLOv8 Seg
 
 import cv2
 import numpy as np
@@ -29,16 +29,17 @@ from hobot_dnn import pyeasy_dnn as dnn
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_detect_bayes_640x640_NCHW.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
-    parser.add_argument('--test-img', type=str, default='./test_img/kite.jpg', help='Path to Load Test Image.')
+    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_seg_bayes_640x640_NCHW.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
+    parser.add_argument('--test-img', type=str, default='test_img/bus.jpg', help='Path to Load Test Image.')
     parser.add_argument('--classes-num', type=int, default=80, help='Classes Num to Detect.')
+    parser.add_argument('--mask-num', type=int, default=32, help='Mask Num0.')
     parser.add_argument('--input-size', type=int, default=640, help='Model Input Size')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IoU threshold.')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold.')
     opt = parser.parse_args()
 
     # 推理实例
-    model = YOLOv8_Detect_img(opt)
+    model = YOLOv8_Seg_img(opt)
 
     # 读图
     begin_time = time()
@@ -48,6 +49,7 @@ def main():
     # 存储拉伸量
     img_h, img_w = img.shape[0:2]
     y_scale, x_scale = img_h/model.input_image_size, img_w/model.input_image_size
+    y_scale_corp, x_scale_corp = 160/model.input_image_size, 160/model.input_image_size
 
     # 前处理
     begin_time = time()
@@ -62,27 +64,44 @@ def main():
 
     # 后处理
     begin_time = time()
-    dbboxes, scores, ids, indices = model.postprocess(output_tensors)
+    dbboxes, scores, ids, masks, proto, indices = model.postprocess(output_tensors)
     print("\033[0;31;40m" + "Post Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
     # 绘制
+    begin_time = time()
+    img_h, img_w = img.shape[0:2]
+
+    zeros = np.zeros((160,160,3), dtype=np.uint8)
     begin_time = time()
     for index in indices:
         score = scores[index]
         class_id = ids[index]
         x1, y1, x2, y2 = dbboxes[index]
+        x1_corp, y1_corp, x2_corp, y2_corp = int(x1*x_scale_corp), int(y1*y_scale_corp), int(x2*x_scale_corp), int(y2*y_scale_corp)
+        # mask
+        mask = (np.sum(masks[index, :,:,:]*proto[:,y1_corp:y2_corp,x1_corp:x2_corp], axis=0) > 0.0).astype(np.int32)
+        zeros[y1_corp:y2_corp,x1_corp:x2_corp, :][mask == 1] = yolo_colors[class_id%20]
+        # bbox
         x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
-        print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
+        # print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
         draw_detection(img, (x1, y1, x2, y2), score, class_id)
     print("\033[0;31;40m" + "Draw Result time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
+    begin_time = time()
+    zeros = cv2.resize(zeros, (img_w, img_h),cv2.INTER_LANCZOS4)
+    result = np.clip(img + 0.5*zeros, 0, 255).astype(np.uint8)
+    print("\033[0;31;40m" + "Add Mask time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+
     # 保存图片到本地
     begin_time = time()
-    cv2.imwrite(opt.test_img + ".result.png", img)
+    if img_h > img_w: # 横着
+        cv2.imwrite(opt.test_img + ".result.png", np.hstack((img, zeros, result)))
+    else: # 竖着
+        cv2.imwrite(opt.test_img + ".result.png", np.vstack((img, zeros, result)))
     print("\033[0;31;40m" + "cv2.imwrite time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
 
 
-class YOLOv8_Detect_img():
+class YOLOv8_Seg_img():
     def __init__(self, opt):
         self.img_path = opt.test_img
         self.result_save_path = opt.test_img + ".result.png"
@@ -94,6 +113,7 @@ class YOLOv8_Detect_img():
         self.conf_inverse = -np.log(1/self.conf - 1)
         print("iou threshol = %.2f, conf threshol = %.2f"%(self.iou, self.conf))
         print("sigmoid_inverse threshol = %.2f"%self.conf_inverse)
+        self.nm = opt.mask_num
 
         ### 读取horizon_quantize模型, 并打印这个horizon_quantize模型的输入输出Tensor信息
         try:
@@ -113,15 +133,19 @@ class YOLOv8_Detect_img():
 
         ### 解码映射的顺序, 保证outpus[outputs_order[i]] = outputs_shape_order[i]
         # Large, Medium, Small 
-        self.outputs_order = [-1,-1,-1,-1,-1,-1]
+        self.outputs_order = [-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
         outputs_shape_order = [(1, 64, self.input_image_size//8, self.input_image_size//8), # s_bbox
                             (1, 64, self.input_image_size//16, self.input_image_size//16), # m_bbox
                             (1, 64, self.input_image_size//32, self.input_image_size//32), # l_bbox
                             (1, self.classes_num, self.input_image_size//8, self.input_image_size//8), # s_cls
                             (1, self.classes_num, self.input_image_size//16, self.input_image_size//16), # m_cls
-                            (1, self.classes_num, self.input_image_size//32, self.input_image_size//32)  # l_cls
+                            (1, self.classes_num, self.input_image_size//32, self.input_image_size//32),  # l_cls
+                            (1, self.nm, self.input_image_size//8, self.input_image_size//8), # s_mask
+                            (1, self.nm, self.input_image_size//16, self.input_image_size//16), # m_mask
+                            (1, self.nm, self.input_image_size//32, self.input_image_size//32),  # l_mask
+                            (1, self.nm, 160, 160)
                             ]
-        for i in range(6):
+        for i in range(10):
             a, b = self.quantize_model[0].outputs[i].properties.shape[1:3]
             if a == 64:
                 if b == self.input_image_size//8:
@@ -137,11 +161,20 @@ class YOLOv8_Detect_img():
                     self.outputs_order[4] = i
                 elif b == self.input_image_size//32:
                     self.outputs_order[5] = i
-        for i in range(6):
+            elif a == self.nm:
+                if b == self.input_image_size//8:
+                    self.outputs_order[6] = i
+                elif b == self.input_image_size//16:
+                    self.outputs_order[7] = i
+                elif b == self.input_image_size//32:
+                    self.outputs_order[8] = i
+                elif b == 160:
+                    self.outputs_order[9] = i
+        for i in range(10):
             print(f"horizon_model.outputs[ outputs_order[{i}] ] = {self.quantize_model[0].outputs[self.outputs_order[i]].properties.shape}")
         if -1 in self.outputs_order:
             print("Sorry, your model don't match the post process code.")
-        
+                
         ### 准备一些常量
         # 提前将反量化系数准备好
         self.s_bboxes_scale = self.quantize_model[0].outputs[self.outputs_order[0]].properties.scale_data[:,np.newaxis]
@@ -150,6 +183,11 @@ class YOLOv8_Detect_img():
         self.s_clses_scale = self.quantize_model[0].outputs[self.outputs_order[3]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
         self.m_clses_scale = self.quantize_model[0].outputs[self.outputs_order[4]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
         self.l_clses_scale = self.quantize_model[0].outputs[self.outputs_order[5]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
+        self.s_mask_scale = self.quantize_model[0].outputs[self.outputs_order[6]].properties.scale_data[:, np.newaxis]
+        self.m_mask_scale = self.quantize_model[0].outputs[self.outputs_order[7]].properties.scale_data[:, np.newaxis]
+        self.l_mask_scale = self.quantize_model[0].outputs[self.outputs_order[8]].properties.scale_data[:, np.newaxis]
+
+        self.proto_scale = self.quantize_model[0].outputs[self.outputs_order[9]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
 
         # DFL求期望的系数, 只需要生成一次
         self.weights_static = np.array([i for i in range(16)]).astype(np.float32)[np.newaxis, :, np.newaxis]
@@ -189,11 +227,18 @@ class YOLOv8_Detect_img():
         s_clses = quantize_outputs[self.outputs_order[3]].buffer
         m_clses = quantize_outputs[self.outputs_order[4]].buffer
         l_clses = quantize_outputs[self.outputs_order[5]].buffer
+        s_mask = quantize_outputs[self.outputs_order[6]].buffer
+        m_mask = quantize_outputs[self.outputs_order[7]].buffer
+        l_mask = quantize_outputs[self.outputs_order[8]].buffer
+        proto = quantize_outputs[self.outputs_order[9]].buffer
 
         # classify 分支反量化
         s_clses = s_clses.astype(np.float32) * self.s_clses_scale
         m_clses = m_clses.astype(np.float32) * self.m_clses_scale
         l_clses = l_clses.astype(np.float32) * self.l_clses_scale
+
+        # proto 分支的反量化
+        proto = (proto*self.proto_scale)[0]
 
         # reshape
         s_clses = s_clses[0].reshape(80, -1)
@@ -202,17 +247,20 @@ class YOLOv8_Detect_img():
         s_bboxes = s_bboxes[0].reshape(64, -1)
         m_bboxes = m_bboxes[0].reshape(64, -1)
         l_bboxes = l_bboxes[0].reshape(64, -1)
+        s_mask = s_mask[0].reshape(self.nm, -1)
+        m_mask = m_mask[0].reshape(self.nm, -1)
+        l_mask = l_mask[0].reshape(self.nm, -1)
 
         # 利用numpy向量化操作完成阈值筛选（优化版）
-        s_class_ids = np.argmax(s_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        s_class_ids = np.argmax(s_clses, axis=0)  # 针对6400行，挑选出80个分数中的最大值的索引
         s_max_scores = s_clses[s_class_ids, self.s_static_index] # 使用最大值的索引索引相应的最大值
         s_valid_indices = np.flatnonzero(s_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
-        m_class_ids = np.argmax(m_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        m_class_ids = np.argmax(m_clses, axis=0)  # 针对1600行，挑选出80个分数中的最大值的索引
         m_max_scores = m_clses[m_class_ids, self.m_static_index] # 使用最大值的索引索引相应的最大值
         m_valid_indices = np.flatnonzero(m_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
-        l_class_ids = np.argmax(l_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        l_class_ids = np.argmax(l_clses, axis=0)  # 针对400行，挑选出80个分数中的最大值的索引
         l_max_scores = l_clses[l_class_ids, self.l_static_index] # 使用最大值的索引索引相应的最大值
         l_valid_indices = np.flatnonzero(l_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
@@ -230,6 +278,11 @@ class YOLOv8_Detect_img():
         s_scores = 1 / (1 + np.exp(-s_scores))
         m_scores = 1 / (1 + np.exp(-m_scores))
         l_scores = 1 / (1 + np.exp(-l_scores))
+
+        # 三个Mask分支的反量化
+        s_mask = (s_mask[:,s_valid_indices].astype(np.float32) * self.s_mask_scale).transpose(1,0)
+        m_mask = (m_mask[:,m_valid_indices].astype(np.float32) * self.m_mask_scale).transpose(1,0)
+        l_mask = (l_mask[:,l_valid_indices].astype(np.float32) * self.l_mask_scale).transpose(1,0)
 
         # 3个Bounding Box分支：反量化
         s_bboxes_float32 = s_bboxes[:,s_valid_indices].astype(np.float32) * self.s_bboxes_scale
@@ -260,11 +313,12 @@ class YOLOv8_Detect_img():
         dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes), axis=0)
         scores = np.concatenate((s_scores, m_scores, l_scores), axis=0)
         ids = np.concatenate((s_ids, m_ids, l_ids), axis=0)
+        masks = np.concatenate((s_mask, m_mask, l_mask), axis=0)[:, :, np.newaxis, np.newaxis]
 
         # nms
         indices = cv2.dnn.NMSBoxes(dbboxes, scores, self.conf, self.iou)
 
-        return dbboxes, scores, ids, indices
+        return dbboxes, scores, ids, masks, proto, indices
 
     
 

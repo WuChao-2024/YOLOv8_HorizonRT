@@ -18,71 +18,77 @@
 # -*- coding:utf-8 -*-
 # Author: WuChao D-Robotics
 # Date: 2024-04-16
-# Description: Serial Programming with args
+# Description: Parallel Programming with args
 
-import cv2
+import cv2, argparse, sys
 import numpy as np
+from threading import Thread, Lock
+from queue import Queue
+
 from scipy.special import softmax
-import argparse
-from time import time
+from time import time, sleep
 from hobot_dnn import pyeasy_dnn as dnn
+
+from flask import Flask, render_template, Response
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_detect_bayes_640x640_NCHW.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
+    parser.add_argument('--model-path', type=str, default='YOLO_horizon_bin_model_zoo/yolov8s_seg_bayes_640x640_NCHW.bin', help='Path to Horizon BPU Quantized *.bin Model.\nxj3 (bernoulli2) or xj5 (bayes)')
     parser.add_argument('--test-img', type=str, default='./test_img/kite.jpg', help='Path to Load Test Image.')
     parser.add_argument('--classes-num', type=int, default=80, help='Classes Num to Detect.')
+    parser.add_argument('--mask-num', type=int, default=32, help='Mask Num0.')
     parser.add_argument('--input-size', type=int, default=640, help='Model Input Size')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IoU threshold.')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold.')
     opt = parser.parse_args()
 
+    # 线程数配置
+    n2 = 4  # 推理视频帧线程数
+
+    # 用于控制线程的全局变量
+    global is_loading, is_forwarding, is_writing
+    is_loading, is_forwarding, is_writing = True, True, True
+
     # 推理实例
-    model = YOLOv8_Detect_img(opt)
-
-    # 读图
-    begin_time = time()
-    img = cv2.imread(opt.test_img)
-    print("\033[0;31;40m" + "Read image time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-
-    # 存储拉伸量
-    img_h, img_w = img.shape[0:2]
-    y_scale, x_scale = img_h/model.input_image_size, img_w/model.input_image_size
-
-    # 前处理
-    begin_time = time()
-    input_tensor = model.preprocess(img)
-    print("\033[0;31;40m" + "Pre Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-    print(f"{input_tensor.shape = }")
-
-    # 推理
-    begin_time = time()
-    output_tensors = model.forward(input_tensor)
-    print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-
-    # 后处理
-    begin_time = time()
-    dbboxes, scores, ids, indices = model.postprocess(output_tensors)
-    print("\033[0;31;40m" + "Post Process time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-
-    # 绘制
-    begin_time = time()
-    for index in indices:
-        score = scores[index]
-        class_id = ids[index]
-        x1, y1, x2, y2 = dbboxes[index]
-        x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
-        print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
-        draw_detection(img, (x1, y1, x2, y2), score, class_id)
-    print("\033[0;31;40m" + "Draw Result time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
-
-    # 保存图片到本地
-    begin_time = time()
-    cv2.imwrite(opt.test_img + ".result.png", img)
-    print("\033[0;31;40m" + "cv2.imwrite time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+    model = YOLOv8_Seg_img(opt)
 
 
-class YOLOv8_Detect_img():
+    # 任务队列
+    global task_queue, save_queue, save_queue2
+    task_queue = Queue(30)
+    save_queue = Queue(30)  # 结果保存队列多缓存一些
+    save_queue2 = Queue(30)
+
+    sleep(1)
+
+    # 创建并启动读取线程
+    video_path = "/dev/video0"
+    task_loader = Dataloader_videoCapture(video_path, task_queue, 0.005)
+    task_loader.start()
+
+    # 创建并启动推理线程
+    inference_threads = [InferenceThread(_, model, task_queue, save_queue, save_queue2, 0.005) for _ in range(n2)]
+    for t in inference_threads:
+        t.start()
+    
+
+    # 创建并启动日志打印线程
+    result_writer = msg_printer(task_queue, save_queue, 0.5)
+    result_writer.start()    
+
+    app.run(debug=False, port=7998, host="0.0.0.0")
+
+    print("[INFO] wait_join")
+    task_loader.join()
+    for t in inference_threads:
+        t.join()
+    result_writer.join()
+    result_writer.join()
+    print("[INFO] All task done.")
+    exit()
+
+
+class YOLOv8_Seg_img():
     def __init__(self, opt):
         self.img_path = opt.test_img
         self.result_save_path = opt.test_img + ".result.png"
@@ -94,6 +100,7 @@ class YOLOv8_Detect_img():
         self.conf_inverse = -np.log(1/self.conf - 1)
         print("iou threshol = %.2f, conf threshol = %.2f"%(self.iou, self.conf))
         print("sigmoid_inverse threshol = %.2f"%self.conf_inverse)
+        self.nm = opt.mask_num
 
         ### 读取horizon_quantize模型, 并打印这个horizon_quantize模型的输入输出Tensor信息
         try:
@@ -113,15 +120,19 @@ class YOLOv8_Detect_img():
 
         ### 解码映射的顺序, 保证outpus[outputs_order[i]] = outputs_shape_order[i]
         # Large, Medium, Small 
-        self.outputs_order = [-1,-1,-1,-1,-1,-1]
+        self.outputs_order = [-1,-1,-1,-1,-1,-1,-1,-1,-1,-1]
         outputs_shape_order = [(1, 64, self.input_image_size//8, self.input_image_size//8), # s_bbox
                             (1, 64, self.input_image_size//16, self.input_image_size//16), # m_bbox
                             (1, 64, self.input_image_size//32, self.input_image_size//32), # l_bbox
                             (1, self.classes_num, self.input_image_size//8, self.input_image_size//8), # s_cls
                             (1, self.classes_num, self.input_image_size//16, self.input_image_size//16), # m_cls
-                            (1, self.classes_num, self.input_image_size//32, self.input_image_size//32)  # l_cls
+                            (1, self.classes_num, self.input_image_size//32, self.input_image_size//32),  # l_cls
+                            (1, self.nm, self.input_image_size//8, self.input_image_size//8), # s_mask
+                            (1, self.nm, self.input_image_size//16, self.input_image_size//16), # m_mask
+                            (1, self.nm, self.input_image_size//32, self.input_image_size//32),  # l_mask
+                            (1, self.nm, 160, 160)
                             ]
-        for i in range(6):
+        for i in range(10):
             a, b = self.quantize_model[0].outputs[i].properties.shape[1:3]
             if a == 64:
                 if b == self.input_image_size//8:
@@ -137,11 +148,20 @@ class YOLOv8_Detect_img():
                     self.outputs_order[4] = i
                 elif b == self.input_image_size//32:
                     self.outputs_order[5] = i
-        for i in range(6):
+            elif a == self.nm:
+                if b == self.input_image_size//8:
+                    self.outputs_order[6] = i
+                elif b == self.input_image_size//16:
+                    self.outputs_order[7] = i
+                elif b == self.input_image_size//32:
+                    self.outputs_order[8] = i
+                elif b == 160:
+                    self.outputs_order[9] = i
+        for i in range(10):
             print(f"horizon_model.outputs[ outputs_order[{i}] ] = {self.quantize_model[0].outputs[self.outputs_order[i]].properties.shape}")
         if -1 in self.outputs_order:
             print("Sorry, your model don't match the post process code.")
-        
+                
         ### 准备一些常量
         # 提前将反量化系数准备好
         self.s_bboxes_scale = self.quantize_model[0].outputs[self.outputs_order[0]].properties.scale_data[:,np.newaxis]
@@ -150,6 +170,11 @@ class YOLOv8_Detect_img():
         self.s_clses_scale = self.quantize_model[0].outputs[self.outputs_order[3]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
         self.m_clses_scale = self.quantize_model[0].outputs[self.outputs_order[4]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
         self.l_clses_scale = self.quantize_model[0].outputs[self.outputs_order[5]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
+        self.s_mask_scale = self.quantize_model[0].outputs[self.outputs_order[6]].properties.scale_data[:, np.newaxis]
+        self.m_mask_scale = self.quantize_model[0].outputs[self.outputs_order[7]].properties.scale_data[:, np.newaxis]
+        self.l_mask_scale = self.quantize_model[0].outputs[self.outputs_order[8]].properties.scale_data[:, np.newaxis]
+
+        self.proto_scale = self.quantize_model[0].outputs[self.outputs_order[9]].properties.scale_data[np.newaxis, :, np.newaxis, np.newaxis]
 
         # DFL求期望的系数, 只需要生成一次
         self.weights_static = np.array([i for i in range(16)]).astype(np.float32)[np.newaxis, :, np.newaxis]
@@ -189,11 +214,18 @@ class YOLOv8_Detect_img():
         s_clses = quantize_outputs[self.outputs_order[3]].buffer
         m_clses = quantize_outputs[self.outputs_order[4]].buffer
         l_clses = quantize_outputs[self.outputs_order[5]].buffer
+        s_mask = quantize_outputs[self.outputs_order[6]].buffer
+        m_mask = quantize_outputs[self.outputs_order[7]].buffer
+        l_mask = quantize_outputs[self.outputs_order[8]].buffer
+        proto = quantize_outputs[self.outputs_order[9]].buffer
 
         # classify 分支反量化
         s_clses = s_clses.astype(np.float32) * self.s_clses_scale
         m_clses = m_clses.astype(np.float32) * self.m_clses_scale
         l_clses = l_clses.astype(np.float32) * self.l_clses_scale
+
+        # proto 分支的反量化
+        proto = (proto*self.proto_scale)[0]
 
         # reshape
         s_clses = s_clses[0].reshape(80, -1)
@@ -202,17 +234,20 @@ class YOLOv8_Detect_img():
         s_bboxes = s_bboxes[0].reshape(64, -1)
         m_bboxes = m_bboxes[0].reshape(64, -1)
         l_bboxes = l_bboxes[0].reshape(64, -1)
+        s_mask = s_mask[0].reshape(self.nm, -1)
+        m_mask = m_mask[0].reshape(self.nm, -1)
+        l_mask = l_mask[0].reshape(self.nm, -1)
 
         # 利用numpy向量化操作完成阈值筛选（优化版）
-        s_class_ids = np.argmax(s_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        s_class_ids = np.argmax(s_clses, axis=0)  # 针对6400行，挑选出80个分数中的最大值的索引
         s_max_scores = s_clses[s_class_ids, self.s_static_index] # 使用最大值的索引索引相应的最大值
         s_valid_indices = np.flatnonzero(s_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
-        m_class_ids = np.argmax(m_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        m_class_ids = np.argmax(m_clses, axis=0)  # 针对1600行，挑选出80个分数中的最大值的索引
         m_max_scores = m_clses[m_class_ids, self.m_static_index] # 使用最大值的索引索引相应的最大值
         m_valid_indices = np.flatnonzero(m_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
-        l_class_ids = np.argmax(l_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
+        l_class_ids = np.argmax(l_clses, axis=0)  # 针对400行，挑选出80个分数中的最大值的索引
         l_max_scores = l_clses[l_class_ids, self.l_static_index] # 使用最大值的索引索引相应的最大值
         l_valid_indices = np.flatnonzero(l_max_scores >= self.conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
 
@@ -230,6 +265,11 @@ class YOLOv8_Detect_img():
         s_scores = 1 / (1 + np.exp(-s_scores))
         m_scores = 1 / (1 + np.exp(-m_scores))
         l_scores = 1 / (1 + np.exp(-l_scores))
+
+        # 三个Mask分支的反量化
+        s_mask = (s_mask[:,s_valid_indices].astype(np.float32) * self.s_mask_scale).transpose(1,0)
+        m_mask = (m_mask[:,m_valid_indices].astype(np.float32) * self.m_mask_scale).transpose(1,0)
+        l_mask = (l_mask[:,l_valid_indices].astype(np.float32) * self.l_mask_scale).transpose(1,0)
 
         # 3个Bounding Box分支：反量化
         s_bboxes_float32 = s_bboxes[:,s_valid_indices].astype(np.float32) * self.s_bboxes_scale
@@ -260,15 +300,202 @@ class YOLOv8_Detect_img():
         dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes), axis=0)
         scores = np.concatenate((s_scores, m_scores, l_scores), axis=0)
         ids = np.concatenate((s_ids, m_ids, l_ids), axis=0)
+        masks = np.concatenate((s_mask, m_mask, l_mask), axis=0)[:, :, np.newaxis, np.newaxis]
 
         # nms
         indices = cv2.dnn.NMSBoxes(dbboxes, scores, self.conf, self.iou)
 
-        return dbboxes, scores, ids, indices
+        return dbboxes, scores, ids, masks, proto, indices
 
+
+def signal_handler(signal, frame):
+    global is_loading, is_forwarding, is_writing
+    is_loading, is_forwarding, is_writing = False, False, False
+    print('Ctrl+C, stopping!!!')
+    sys.exit(0)
+
+
+class Dataloader_videoCapture(Thread):
+    # 从cap中读帧, 一直读到无帧可读
+    # delay_time 用于控制读帧的频率，尽量和极限帧率的帧间隔一致, 一般设置为0.033 s
+    def __init__(self, video_path, task_queue, delay_time):
+        Thread.__init__(self)
+        self.cap = cv2.VideoCapture(video_path)
+        self.task_queue = task_queue
+        self.delay_time = delay_time
+    def run(self):
+        global is_loading
+        while is_loading:
+            if not self.task_queue.full():
+                # begin_time = time()
+                ret, frame = self.cap.read()
+                if ret:
+                    self.task_queue.put(frame)
+                else:
+                    is_loading = False
+                    self.cap.release()
+                    break
+                # print("\033[0;31;40m" + "Read time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
+            sleep(self.delay_time)
+        print("[INFO] Dateloader thread exit.")
+
+class InferenceThread(Thread):
+    # 推理的线程
+    def __init__(self, i, model, task_queue, result_queue,result_queue2, delay_time):
+        Thread.__init__(self)
+        self.task_queue = task_queue
+        self.result_queue = result_queue
+        self.result_queue2 = result_queue2
+        self.model = model
+        self.delay_time = delay_time
+        self.i = i
+    def run(self):
+        global is_forwarding, is_running, frame_counter
+        while is_forwarding:
+            if not self.task_queue.empty():
+                # begin_time = time()
+                # 从任务队列取图
+                img = self.task_queue.get()
+                # 存储拉伸量
+                img_h, img_w = img.shape[0:2]
+                y_scale, x_scale = img_h/self.model.input_image_size, img_w/self.model.input_image_size
+                y_scale_corp, x_scale_corp = 160/self.model.input_image_size, 160/self.model.input_image_size
+                # 前处理
+                input_tensor = self.model.preprocess(img)
+                # 推理
+                output_tensors = self.model.forward(input_tensor)
+                # 后处理
+                dbboxes, scores, ids, masks, proto, indices = self.model.postprocess(output_tensors)
+
+                # 绘制
+                img_h, img_w = img.shape[0:2]
+                zeros = np.zeros((160,160,3), dtype=np.uint8)
+                begin_time = time()
+                for index in indices:
+                    score = scores[index]
+                    class_id = ids[index]
+                    x1, y1, x2, y2 = dbboxes[index]
+                    x1_corp, y1_corp, x2_corp, y2_corp = int(x1*x_scale_corp), int(y1*y_scale_corp), int(x2*x_scale_corp), int(y2*y_scale_corp)
+                    # mask
+                    mask = (np.sum(masks[index, :,:,:]*proto[:,y1_corp:y2_corp,x1_corp:x2_corp], axis=0) > 0.0).astype(np.int32)
+                    zeros[y1_corp:y2_corp,x1_corp:x2_corp, :][mask == 1] = yolo_colors[class_id%20]
+                    # bbox
+                    x1, y1, x2, y2 = int(x1*x_scale), int(y1*y_scale), int(x2*x_scale), int(y2*y_scale)
+                    # print("(%d, %d, %d, %d) -> %s: %.2f"%(x1,y1,x2,y2, coco_names[class_id], score))
+                    draw_detection(img, (x1, y1, x2, y2), score, class_id)
+                # zeros = cv2.resize(zeros, (img_w, img_h),cv2.INTER_LANCZOS4)
+
+                # 结果存入结果队列
+                trytimes = 5
+                while trytimes > 0:
+                    trytimes -= 1
+                    if not self.result_queue.full():
+                        trytimes = 0
+                        self.result_queue.put(img)
+                        self.result_queue2.put(zeros)
+                # 帧率计数器自增
+                if trytimes >= 0:
+                    frame_counter += 1
+                # print("\033[0;31;40m" + "Forward time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")
+            elif not is_loading:
+                is_forwarding = False
+            sleep(self.delay_time)
+        print(f"[INFO] Forward thread {self.i} exit.")
+
+
+app = Flask(__name__)
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/video_feed2')
+def video_feed2():
+    return Response(gen_frames2(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/')
+def index():
+    return render_template('index_seg.html')
+
+def gen_frames():
+    global is_forwarding, is_writing, save_queue
+    while not save_queue.empty():
+        save_queue.get()
+    res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
+    res = 0.0
+    res_time = time()
+    while is_writing:
+        if not save_queue.empty():
+            # begin_time = time()
+            img = save_queue.get()
+            # 编码压缩
+            cv2.putText(img, '%.2f fps'%fps, (40, 40), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+            ret, buffer = cv2.imencode('.jpg', img,[cv2.IMWRITE_PNG_COMPRESSION, 70])
+            yield (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            #print("\033[0;31;40m" + "Frame Write time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
+            res_counter += 1
+            if res_counter > 10:
+                res += (time() - res_time - 0.33)
+                while res > 0.033:
+                    save_queue.get()
+                    res -= 0.033
+                res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
+                res = 0.0
+                res_time = time()
+
+        elif not is_forwarding:
+            is_writing = False
+        sleep(0.001)
+
+def gen_frames2():
+    global is_forwarding, is_writing, save_queue2
+    while not save_queue.empty():
+        save_queue.get()
+    res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
+    res = 0.0
+    res_time = time()
+    while is_writing:
+        if not save_queue2.empty():
+            # begin_time = time()
+            mask = save_queue2.get()
+            # 编码压缩
+            ret, buffer2 = cv2.imencode('.jpg', mask,[cv2.IMWRITE_PNG_COMPRESSION, 70])
+            yield (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + buffer2.tobytes() + b'\r\n')
+            # print("\033[0;31;40m" + "Frame Write time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
+            res_counter += 1
+            if res_counter > 10:
+                res += (time() - res_time - 0.33)
+                while res > 0.033:
+                    save_queue.get()
+                    res -= 0.033
+                res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
+                res = 0.0
+                res_time = time()
+        elif not is_forwarding:
+            is_writing = False
+        sleep(0.001)
     
-
-
+class msg_printer(Thread): 
+    # 用于计算帧率的全局变量
+    def __init__(self, task_queue, save_queue, delay_time):
+        Thread.__init__(self)
+        self.delay_time = delay_time
+        self.task_queue = task_queue
+        self.save_queue = save_queue
+    def run(self):
+        global frame_counter, fps
+        frame_counter = 0
+        fps = 0.0
+        begin_time = time()
+        while is_loading or is_forwarding or is_writing:
+            delta_time = time() - begin_time
+            fps = frame_counter/delta_time
+            frame_counter = 0
+            begin_time = time()       
+            print("Smart FPS = %.2f, task_queue_size = %d, save_queue_size = %d"%(fps, self.task_queue.qsize(), self.save_queue.qsize())) 
+            sleep(self.delay_time)
+        print("[INFO] msg_printer thread exit.")
   
 # 一些常量或函数
 coco_names = [

@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>YOLOv8实时视频推流 演示</title>
+</head>
+<body>
+    <h1>《基于地平线次世代智能驾驶芯片 征程5 的单目2D感知系统设计》</h1>
+    <h1>作者：吴超, 指导老师: 庄元颖</h1>
+    <h2>实时视频推流</h2>
+    <img src="{{ url_for('video_feed') }}" alt="实时视频" width="640" height="480">
+    <img src="{{ url_for('video_feed2') }}" alt="mask" width="640" height="480">
+    <h2>地平线征程5参数: 8×A55@1.2Ghz, 2×BPU@128TOPS, 纯国产车规级智能计算平台</h2>
+    <h2>AI模型: YOLOv8s Seg, 1180万参数, 实例分割, 640×640, 80类别, int8量化</h2>
+</body>
+</html>
