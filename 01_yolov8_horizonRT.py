@@ -19,8 +19,8 @@ from time import time
 from hobot_dnn import pyeasy_dnn as dnn
 
 img_path = "./test_img/zidane.jpg"
-result_save_path = "./zidan.result.png"
-quantize_model_path = "./yolov8s_detect_Bayes_640x640_NCHW.bin" # XJ5
+result_save_path = "./test_img/zidan.result.png"
+quantize_model_path = "YOLO_horizon_bin_model_zoo/yolov8s_detect_bayes_640x640_NCHW.bin" # XJ5
 # quantize_model_path = "./yolov8s_horizon_fix_detect_bernoulli2_640x640_NCHW_2cores.bin" # XJ3
 input_image_size = 640
 conf=0.5
@@ -177,6 +177,7 @@ m_valid_indices = np.flatnonzero(m_max_scores >= conf_inverse)  # 得到大于�
 l_class_ids = np.argmax(l_clses, axis=0)  # 针对8400行，挑选出80个分数中的最大值的索引
 l_max_scores = l_clses[l_class_ids,l_static_index] # 使用最大值的索引索引相应的最大值
 l_valid_indices = np.flatnonzero(l_max_scores >= conf_inverse)  # 得到大于阈值分数的索引，此时为小数字
+
 
 # 利用筛选结果，索引分数值和id值
 s_scores = s_max_scores[s_valid_indices]

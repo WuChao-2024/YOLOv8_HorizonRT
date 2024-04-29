@@ -435,10 +435,10 @@ def gen_frames():
             #print("\033[0;31;40m" + "Frame Write time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
             res_counter += 1
             if res_counter > 10:
-                res += (time() - res_time - 0.33)
-                while res > 0.033:
+                res += (time() - res_time - 0.34)
+                while res > 0.034:
                     save_queue.get()
-                    res -= 0.033
+                    res -= 0.034
                 res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
                 res = 0.0
                 res_time = time()
@@ -465,10 +465,10 @@ def gen_frames2():
             # print("\033[0;31;40m" + "Frame Write time = %.2f ms"%(1000*(time() - begin_time)) + "\033[0m")            
             res_counter += 1
             if res_counter > 10:
-                res += (time() - res_time - 0.33)
-                while res > 0.033:
+                res += (time() - res_time - 0.34)
+                while res > 0.034:
                     save_queue.get()
-                    res -= 0.033
+                    res -= 0.034
                 res_counter = 0 # 每隔10帧检测，如果大于0.33秒，则丢掉res/0.033帧
                 res = 0.0
                 res_time = time()
