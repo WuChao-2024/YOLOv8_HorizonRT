@@ -1,3 +1,3 @@
 English| [简体中文](./README_cn.md)
 
-# YOLOv8_HorizonRT作者毕业论文查重需要，暂时隐藏
+# RDK Model Zoo: https://github.com/D-Robotics/rdk_model_zoo
